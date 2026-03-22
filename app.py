@@ -64,6 +64,25 @@ def add_log(msg: str):
     st.session_state.log = st.session_state.log[:100]  # keep last 100
 
 
+def get_api(device: dict, path: str, timeout: float = 4.0) -> dict:
+    """Shortcut for GET requests, returns text response."""
+    res = send_request(device, "GET", path)
+    res["text"] = res.get("body", "")
+    return res
+
+
+def rssi_label(val: str) -> str:
+    try:
+        v = int(val)
+        if v >= -55:  return f"Xuất sắc ({v} dBm)"
+        if v >= -67:  return f"Tốt ({v} dBm)"
+        if v >= -78:  return f"Khá ({v} dBm)"
+        if v >= -85:  return f"Yếu ({v} dBm)"
+        return f"Không ổn định ({v} dBm)"
+    except Exception:
+        return val
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("⚙️ Cấu hình")
@@ -125,9 +144,9 @@ st.divider()
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_control, tab_request, tab_log = st.tabs(["🎮 Điều khiển", "📡 Gửi Request", "📋 Nhật ký"])
 
-# ── Tab 1: Quick controls ─────────────────────────────────────────────────────
+# ── Tab 1: AI-on-the-Edge controls ───────────────────────────────────────────
 with tab_control:
-    st.subheader("Điều khiển nhanh")
+    st.subheader("Điều khiển thiết bị AI on the Edge")
     ctrl_cols = st.columns(len(devices))
 
     for col, dev, status in zip(ctrl_cols, devices, statuses):
@@ -138,45 +157,105 @@ with tab_control:
             if disabled:
                 st.warning("Thiết bị offline")
 
-            # Ping
-            if st.button("🏓 Ping", key=f"ping_{dev['name']}", use_container_width=True, disabled=disabled):
-                s = check_status(dev)
-                if s["online"]:
-                    add_log(f"PING {dev['name']}: {s['latency_ms']} ms")
-                    st.success(f"Pong! {s['latency_ms']} ms")
-                else:
-                    add_log(f"PING {dev['name']}: FAILED — {s.get('error')}")
-                    st.error(f"Không phản hồi: {s.get('error')}")
+            # ── Nhận dạng ────────────────────────────────────────────────────
+            st.markdown("**📸 Nhận dạng**")
 
-            # GET /status
-            if st.button("📥 GET /status", key=f"get_status_{dev['name']}",
-                         use_container_width=True, disabled=disabled):
-                res = send_request(dev, "GET", "status")
-                add_log(f"GET /status {dev['name']}: {res.get('status', res.get('error'))}")
-                if res["ok"]:
-                    st.code(res["body"], language="json")
-                else:
-                    st.error(res["error"])
-
-            # GET /info
-            if st.button("ℹ️ GET /info", key=f"get_info_{dev['name']}",
-                         use_container_width=True, disabled=disabled):
-                res = send_request(dev, "GET", "info")
-                add_log(f"GET /info {dev['name']}: {res.get('status', res.get('error'))}")
-                if res["ok"]:
-                    st.code(res["body"], language="json")
-                else:
-                    st.error(res["error"])
-
-            # Restart
-            if st.button("🔁 POST /restart", key=f"restart_{dev['name']}",
+            if st.button("▶ Bắt đầu vòng nhận dạng", key=f"flow_{dev['name']}",
                          use_container_width=True, type="primary", disabled=disabled):
-                res = send_request(dev, "POST", "restart")
-                add_log(f"POST /restart {dev['name']}: {res.get('status', res.get('error'))}")
-                if res["ok"]:
-                    st.success(f"Đã gửi lệnh restart ({res['status']})")
-                else:
-                    st.error(res["error"])
+                res = get_api(dev, "flow_start")
+                add_log(f"flow_start {dev['name']}: {res.get('text') or res.get('error')}")
+                st.success(res["text"]) if res["ok"] else st.error(res["error"])
+
+            if st.button("📊 Xem giá trị hiện tại", key=f"val_{dev['name']}",
+                         use_container_width=True, disabled=disabled):
+                for label, t in [("Giá trị", "value"), ("Thô", "raw"),
+                                  ("Trước", "prevalue"), ("Trạng thái", "error")]:
+                    r = get_api(dev, f"value?all=true&type={t}")
+                    v = r["text"] if r["ok"] else f"⚠️ {r['error']}"
+                    st.text(f"{label}: {v}")
+                add_log(f"Đọc giá trị {dev['name']}")
+
+            if st.button("🖼 Tải ảnh ROI", key=f"img_{dev['name']}",
+                         use_container_width=True, disabled=disabled):
+                img_url = build_url(dev, f"img_tmp/alg_roi.jpg?t={int(time.time())}")
+                st.image(img_url, caption="alg_roi.jpg", use_container_width=True)
+                add_log(f"Tải ảnh ROI {dev['name']}")
+
+            st.divider()
+
+            # ── Giá trị trước (Previous Value) ───────────────────────────────
+            st.markdown("**🔢 Đặt Previous Value**")
+
+            numbers_res = get_api(dev, "value?all=true&type=raw") if not disabled else {"ok": False}
+            if numbers_res["ok"]:
+                lines = [l.split("\t") for l in numbers_res["text"].split("\r") if "\t" in l]
+                number_ids = [l[0] for l in lines if l] or ["main"]
+            else:
+                number_ids = ["main"]
+
+            sel_num = st.selectbox("Meter ID", number_ids,
+                                   key=f"num_{dev['name']}", disabled=disabled)
+            new_val = st.text_input("Giá trị mới", placeholder="e.g. 12345.678",
+                                    key=f"preval_{dev['name']}", disabled=disabled)
+
+            pc1, pc2 = st.columns(2)
+            if pc1.button("✅ Đặt", key=f"setpre_{dev['name']}",
+                          use_container_width=True, disabled=disabled or not new_val):
+                res = get_api(dev, f"setPreValue?value={new_val}&numbers={sel_num}")
+                add_log(f"setPreValue {dev['name']} → {new_val}: {res.get('text') or res.get('error')}")
+                st.success(res["text"]) if res["ok"] else st.error(res["error"])
+
+            if pc2.button("🔄 Reset", key=f"resetpre_{dev['name']}",
+                          use_container_width=True, disabled=disabled):
+                res = get_api(dev, f"setPreValue?numbers={sel_num}")
+                add_log(f"resetPreValue {dev['name']}: {res.get('text') or res.get('error')}")
+                st.success("Đã reset") if res["ok"] else st.error(res["error"])
+
+            st.divider()
+
+            # ── Hệ thống ──────────────────────────────────────────────────────
+            st.markdown("**⚙️ Hệ thống**")
+
+            if st.button("📋 Xem trạng thái flow", key=f"sf_{dev['name']}",
+                         use_container_width=True, disabled=disabled):
+                res = get_api(dev, "statusflow")
+                add_log(f"statusflow {dev['name']}: {res.get('text') or res.get('error')}")
+                st.info(res["text"]) if res["ok"] else st.error(res["error"])
+
+            if st.button("🌡 CPU / WiFi / Uptime", key=f"sysinfo_{dev['name']}",
+                         use_container_width=True, disabled=disabled):
+                for label, path in [("CPU Temp", "cpu_temperature"),
+                                     ("WiFi", "rssi"),
+                                     ("Uptime", "uptime"),
+                                     ("Date", "date"),
+                                     ("Round", "info?type=Round"),
+                                     ("Firmware", "info?type=FirmwareVersion")]:
+                    r = get_api(dev, path)
+                    val = rssi_label(r["text"]) if path == "rssi" else (r["text"] if r["ok"] else f"⚠️ {r['error']}")
+                    st.text(f"{label}: {val}")
+                add_log(f"Xem sysinfo {dev['name']}")
+
+            if st.button("📤 Gửi lại HA Discovery", key=f"mqtt_{dev['name']}",
+                         use_container_width=True, disabled=disabled):
+                res = get_api(dev, "mqtt_publish_discovery")
+                add_log(f"mqtt_discovery {dev['name']}: {res.get('text') or res.get('error')}")
+                st.success(res["text"]) if res["ok"] else st.error(res["error"])
+
+            if st.button("🔁 Reboot", key=f"reboot_{dev['name']}",
+                         use_container_width=True, disabled=disabled):
+                res = get_api(dev, "reboot")
+                add_log(f"reboot {dev['name']}: {res.get('text') or res.get('error')}")
+                st.info("Thiết bị đang khởi động lại…") if res["ok"] else st.error(res["error"])
+
+            st.divider()
+
+            # ── Liên kết nhanh ────────────────────────────────────────────────
+            st.markdown("**🔗 Liên kết nhanh**")
+            st.link_button("🌐 Web UI",      build_url(dev),                  use_container_width=True)
+            st.link_button("📁 File Server", build_url(dev, "fileserver/"),   use_container_width=True)
+            st.link_button("📄 Log file",    build_url(dev, "logfileact"),    use_container_width=True)
+            st.link_button("📊 Data file",   build_url(dev, "datafileact"),   use_container_width=True)
+            st.link_button("▶ Livestream",   build_url(dev, "stream"),        use_container_width=True)
 
 # ── Tab 2: Custom request ─────────────────────────────────────────────────────
 with tab_request:
