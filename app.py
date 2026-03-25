@@ -13,8 +13,8 @@ st.set_page_config(
 
 # ── Default device config ─────────────────────────────────────────────────────
 DEFAULT_DEVICES = [
-    {"name": "Device 1", "ip": "172.20.10.10", "port": 80},
-    {"name": "Device 2", "ip": "172.20.10.11", "port": 80},
+    {"name": "Device 1", "ip": "192.168.137.7", "port": 80},
+    {"name": "Device 2", "ip": "192.168.137.68", "port": 80},
 ]
 
 # ── Session state init ────────────────────────────────────────────────────────
